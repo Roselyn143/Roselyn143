@@ -1,0 +1,293 @@
+// Code to Create Mass Shipment
+
+// Variable Declaration
+string inputValues = this.OrderValues;
+
+int httptimeout = 60, CustNum = 0, packNum = 0, OrderRel = 0, NoofCartontoCreate = 0;
+
+string workstationurl = "", creditMsg = "", pkgCode = "", opReleaseMessage = "", opCompleteMessage = "", opShippingMessage = "", opLotMessage = "", opInventoryMessage = "", opLockQtyMessage = "", opAllocationMessage = "", opPartListNeedsAttr = "", opLotListNeedsAttr = "", shipCreditMsg = "", msg = "", opPostUpdMessage = "", InventoryShipUOM = "", LineDesc = "", Status = "", Bin = "", WhseCode = "", Key2 = "", Key5 = "",
+ShipVia = "", sizeUOM = "", weightUOM = "", MiscDesc = "", MiscType = "", MiscCode = "";
+
+bool opPromptforNum = false, cError = false, compError = false, updateComplete = false, checkComplianceError = false, changeStatusError = false, checkShipDtlAgain = false, allowNewShipTo = false, ipResetCODCharges = false, ipResetInsCharges = false, morePages = false;
+
+Guid sysSLNRowID = Guid.NewGuid();
+
+decimal QtyConversion = 0.0M, OrderdtlQty = 0.0m, L = 0.0m, W = 0.0m, H = 0.0m, PHWeight = 0.0m, NoofCase = 0.0m, weight = 0.0m, ShipQty = 0.0m, PHWeighttobeUpdated = 0.0m, Miscamt = 0.0m;
+
+// Action to perform Customer Shipment
+Action<int, string, int, decimal> CreateCustShip = (orderNum, partNum, orderline, qty) =>
+{
+    // Fetch Order CustNum
+    var dbOrderHed = Db.OrderHed.FirstOrDefault(d => d.Company == Session.CompanyID && d.OrderNum == orderNum);
+    if (dbOrderHed != null)
+    {
+        CustNum = dbOrderHed.CustNum;
+    }
+
+    var dbworkstation = Db.WorkStation.FirstOrDefault(d => d.Company == Session.CompanyID && d.WorkStationID == this.Session.WorkstationID);
+    if (dbworkstation != null)
+    {
+        workstationurl = dbworkstation.WebServiceUrl;
+    }
+
+    // Fetch Order Dtl to fill Ship dtl Values
+    var dbOrderDtl = Db.OrderDtl.FirstOrDefault(d => d.Company == Session.CompanyID && d.OrderNum == orderNum && d.PartNum == partNum && d.OrderLine == orderline);
+    if (dbOrderDtl != null)
+    {
+        OrderdtlQty = dbOrderDtl.OrderQty;
+        InventoryShipUOM = dbOrderDtl.IUM;
+        LineDesc = dbOrderDtl.LineDesc;
+    }
+    // Fetch bin and whse values
+    var dbPartWhse = Db.PartWhse.FirstOrDefault(d => d.Company == Session.CompanyID && d.PartNum == partNum);
+    if (dbPartWhse != null)
+    {
+        WhseCode = dbPartWhse.WarehouseCode;
+    }
+    var dbPartbin = Db.PartBin.FirstOrDefault(d => d.Company == Session.CompanyID && d.PartNum == partNum && d.OnhandQty > 0 && d.WarehouseCode == WhseCode);
+    if (dbPartbin != null)
+    {
+        Bin = dbPartbin.BinNum;
+    }
+    // Conversion to get the Phantom Details from Phantom
+    Key2 = orderNum.ToString();
+    Key5 = qty.ToString();
+    var dbUD01 = Db.UD01.FirstOrDefault(d => d.Company == Session.CompanyID && d.Key4 == partNum && d.Key2 == Key2 && d.Key5 == Key5);
+    if (dbUD01 != null)
+    {
+        L = dbUD01.Number01;
+        W = dbUD01.Number02;
+        H = dbUD01.Number03;
+        PHWeight = dbUD01.Number04;
+        NoofCase = dbUD01.Number05;
+        NoofCartontoCreate = Convert.ToInt32(NoofCase);
+        PHWeighttobeUpdated = dbUD01.Number04 / NoofCartontoCreate;
+    }
+
+    var dbMiscCharge = Db.MiscChrg.FirstOrDefault(d => d.Company == Session.CompanyID && d.MiscCode == "FRGT");
+    if (dbMiscCharge != null)
+    {
+        MiscCode = dbMiscCharge.MiscCode;
+        MiscDesc = dbMiscCharge.Description;
+        Miscamt = dbMiscCharge.MiscAmt;
+        MiscType = dbMiscCharge.Type;
+    }
+
+    // Using transaction scope to ensure atomicity
+    using (var txscope = IceContext.CreateDefaultTransactionScope())
+    {
+        try
+        {
+            // Create PackNum for each Release
+            var dbOrderRel = Db.OrderRel.Where(d => d.Company == Session.CompanyID && d.PartNum == partNum && d.OrderNum == orderNum && d.Shipped_c == false && d.OurReqQty == qty && d.OrderLine == orderline).ToList();
+            if (!dbOrderRel.Any()) // Validating to prevent packing in case of reshipped value
+            {
+                throw new BLException("All Releases have been Shipped");
+            }
+            else
+            {
+                foreach (var orderRel in dbOrderRel)
+                {
+                    // Calling Service to perform Customer Shipment
+                    this.CallService<Erp.Contracts.CustShipSvcContract>(cssv =>
+                    {
+                        var csts = new Erp.Tablesets.CustShipTableset();
+                        // Create New Shiphead
+                        cssv.GetNewShipHead(ref csts);
+                        cssv.GetHeadOrderInfo(orderNum, out creditMsg, ref csts);
+
+                        pkgCode = orderRel.PkgCode_c;
+                        weight = orderRel.Weight_c;
+                        weightUOM = orderRel.WeightUOM_c;
+                        sizeUOM = orderRel.PkgSizeUOM_c;
+                        ShipVia = orderRel.ShipViaCode_c;
+
+                        cssv.GetPackaging(pkgCode, ref csts);
+                        csts.ShipHead[0].ShipViaCode = ShipVia;
+
+                        packNum = 0;
+                        cssv.GetLegalNumGenOpts(packNum, ref csts, out opPromptforNum);
+
+                        cssv.UpdateMaster(ref csts, false, false, false, false, false, false, false, 0, 
+						, out opReleaseMessage, out opCompleteMessage, out opShippingMessage, out opLotMessage, out opInventoryMessage, out opLockQtyMessage, out opAllocationMessage, out opPartListNeedsAttr, out opLotListNeedsAttr, out shipCreditMsg, out cError, out compError, out msg, out opPostUpdMessage, out updateComplete, out checkComplianceError, out changeStatusError, out checkShipDtlAgain);
+
+                        packNum = csts.ShipHead[0].PackNum;
+
+                        // Create New Shipdtl
+                        cssv.GetNewOrdrShipDtl(ref csts, packNum, 0);
+                        cssv.GetOrderInfo(orderNum, out creditMsg, ref csts);
+                        cssv.GetOrderLineInfo(ref csts, 0, orderline, partNum);
+
+                        OrderRel = Convert.ToInt32(orderRel.OrderRelNum);
+                        //throw new BLException(OrderRel.ToString());
+
+                        int packline = 0;
+                        allowNewShipTo = true;
+                        cssv.GetOrderRelInfo(ref csts, packline, OrderRel, allowNewShipTo);
+
+                        csts.ShipDtl[0].InventoryShipUOM = InventoryShipUOM;
+                        csts.ShipDtl[0].PartNum = partNum;
+                        csts.ShipDtl[0].LineDesc = LineDesc;
+                        csts.ShipDtl[0].OurInventoryShipQty = OrderdtlQty;
+                        csts.ShipDtl[0].DisplayInvQty = orderRel.OurReqQty;
+                        csts.ShipDtl[0].SellingShippedQty = orderRel.OurReqQty;
+                        csts.ShipDtl[0].WarehouseCode = orderRel.WarehouseCode;
+                        csts.ShipDtl[0].BinNum = Bin;
+                        csts.ShipHead[0].PkgCode = pkgCode;
+                        csts.ShipHead[0].Weight = orderRel.Weight_c;
+                        csts.ShipHead[0].WeightUOM = orderRel.WeightUOM_c;
+                        csts.ShipHead[0].PkgLength = orderRel.PkgLength_c;
+                        csts.ShipHead[0].PkgSizeUOM = orderRel.PkgSizeUOM_c;
+                        csts.ShipHead[0].PkgWidth = orderRel.PkgWidth_c;
+                        csts.ShipHead[0].PkgHeight = orderRel.PkgHeight_c;
+                        csts.ShipHead[0].CtnPkgCode = pkgCode;
+                        csts.ShipDtl[0].ShipCmpl = true;
+
+
+                        cssv.UpdateMaster(ref csts, false, false, false, false, false, false, false, packNum, CustNum, out opReleaseMessage, out opCompleteMessage, out opShippingMessage, out opLotMessage, out opInventoryMessage, out opLockQtyMessage, out opAllocationMessage, out opPartListNeedsAttr, out opLotListNeedsAttr, out shipCreditMsg, out cError, out compError, out msg, out opPostUpdMessage, out updateComplete, out checkComplianceError, out changeStatusError, out checkShipDtlAgain);
+
+                        packline = csts.ShipDtl[0].PackLine;
+
+                        // Change the Status to CLOSE to Create Phantom if Any
+                        sysSLNRowID = csts.ShipHead[0].SysRowID;
+                        Status = "Close";
+                        cssv.ChangeStatus(sysSLNRowID, Status, ipResetCODCharges, ipResetInsCharges, ref csts);
+
+                        // Create Phantom if Any
+                        cssv.PhantomStatusCheck(packNum);
+
+                        cssv.UpdateMaster(ref csts, false, false, false, false, false, false, false, packNum, CustNum, out opReleaseMessage, out opCompleteMessage, out opShippingMessage, out opLotMessage, out opInventoryMessage, out opLockQtyMessage, out opAllocationMessage, out opPartListNeedsAttr, out opLotListNeedsAttr, out shipCreditMsg, out cError, out compError, out msg, out opPostUpdMessage, out updateComplete, out checkComplianceError, out changeStatusError, out checkShipDtlAgain);
+
+                        if (NoofCartontoCreate != 0)
+                        {
+                            cssv.CallsCreateCustomerCartons(packNum, NoofCartontoCreate, pkgCode, L, W, H, true, false, ref csts);
+
+                            cssv.UpdateMaster(ref csts, false, false, false, false, false, false, false, packNum, CustNum, out opReleaseMessage, out opCompleteMessage, out opShippingMessage, out opLotMessage, out opInventoryMessage, out opLockQtyMessage, out opAllocationMessage, out opPartListNeedsAttr, out opLotListNeedsAttr, out shipCreditMsg, out cError, out compError, out msg, out opPostUpdMessage, out updateComplete, out checkComplianceError, out changeStatusError, out checkShipDtlAgain);
+
+                        }
+
+                       /* this.CallService<Erp.Contracts.FreightServiceSvcContract>(FSSV =>
+                        {
+                            var FSDS = new Erp.BO.FreightInfoRequestDataSet();
+                            {
+                                FSSV.BuildCustFreightRequest(packNum);
+                                FSSV.UpdateTimeOut(out httptimeout);
+                                FSSV.FreightCarton(workstationurl, FSDS, this.Session.WorkstationID, httptimeout);
+
+                            }
+                        });
+
+                        this.CallService<Erp.Contracts.FreightServiceSvcContract>(FSSV =>
+                        {
+                            var FSDS = new Erp.Tablesets.FreightInfoResponseTableset();
+                            {
+                                FSSV.UpdateFreightedShipment(packNum, "FRGT", FSDS);
+                            }
+                        });
+*/
+                        this.CallService<Erp.Contracts.SalesOrderSvcContract>(IGSV =>
+                        {
+                            var IGDS = new Erp.Tablesets.SalesOrderTableset();
+                            {
+                                orderRel.Shipped_c = true;
+                                IGSV.Update(ref IGDS);
+                            }
+                        });
+
+                        var CheckShipFlag = (from g in Db.ShipHead where g.Company == Session.CompanyID && g.PackNum == packNum && g.ReadyToInvoice == false select g).FirstOrDefault();
+                        if (CheckShipFlag != null) // Shipment flag not ticked.
+                        {
+                            CheckShipFlag.PkgCode = pkgCode;
+                            CheckShipFlag.Weight = orderRel.Weight_c;
+                            CheckShipFlag.WeightUOM = orderRel.WeightUOM_c;
+                            CheckShipFlag.PkgLength = orderRel.PkgLength_c;
+                            CheckShipFlag.PkgSizeUOM = orderRel.PkgSizeUOM_c;
+                            CheckShipFlag.PkgWidth = orderRel.PkgWidth_c;
+                            CheckShipFlag.PkgHeight = orderRel.PkgHeight_c;
+                            CheckShipFlag.ShipViaCode = ShipVia;
+                            Db.SaveChanges();
+                            
+                            //Update the Values
+                            if (NoofCartontoCreate != 0)
+                            {
+                                var CartonTrk = (from g in Db.CartonTrkDtl where g.Company == Session.CompanyID && g.PackNum == packNum select g).ToList();
+                                foreach (var Carton in CartonTrk)
+                                {
+                                    if (Carton != null) // Shipment flag not ticked.
+                                    {
+                                        Carton.PkgWeight = PHWeighttobeUpdated;
+                                        Carton.PkgHeight = H;
+                                        Carton.PkgLength = L;
+                                        Carton.PkgWidth = W;
+                                        CheckShipFlag.PhantomPack = true;
+                                        Db.SaveChanges();
+                                    }
+                                }
+                            }
+                            this.CallService<Erp.Contracts.CustShipSvcContract>(svc =>
+                            {
+                                var ds = new Erp.Tablesets.UpdExtCustShipTableset();
+
+                                bool errorOccurred;
+                                var ShipHead = new Erp.Tablesets.ShipHeadRow()
+                                {
+                                    Company = Session.CompanyID,
+                                    PackNum = packNum,
+                                    ReadyToInvoice = true,
+                                };
+                                ds.ShipHead.Add(ShipHead);
+
+                                BOUpdErrorTableset boUpdateErrors = svc.UpdateExt(ref ds, true, true, out errorOccurred);
+
+                                foreach (var tR in (from r in boUpdateErrors.BOUpdError select r).ToList())
+                                {
+                                    this.PublishInfoMessage(tR.ErrorText, Ice.Common.BusinessObjectMessageType.Information, Ice.Bpm.InfoMessageDisplayMode.Individual, "", "");
+
+                                }
+                            });
+
+                            cssv.UpdateMaster(ref csts, false, false, false, false, true, false, false, packNum, CustNum, out opReleaseMessage, out opCompleteMessage, out opShippingMessage, out opLotMessage, out opInventoryMessage, out opLockQtyMessage, out opAllocationMessage, out opPartListNeedsAttr, out opLotListNeedsAttr, out shipCreditMsg, out cError, out compError, out msg, out opPostUpdMessage, out updateComplete, out checkComplianceError, out changeStatusError, out checkShipDtlAgain);
+                        }
+                    });
+                    this.output = true;
+                }
+            }
+
+            txscope.Complete();
+
+        }
+        
+        catch (Exception ex)
+        {
+            
+             throw new BLException("An error occurred during shipment creation.", ex);
+        }
+        finally
+        {
+        txscope.Dispose();
+        }
+        
+    }
+};
+
+// Parse Input Values and Create Customer Shipments
+if (!string.IsNullOrEmpty(inputValues))
+{
+    string[] inputList = inputValues.Split(',').Where(x => !string.IsNullOrEmpty(x)).ToArray();
+    foreach (var item in inputList)
+    {
+        string[] arr = item.Split('~');
+        if (arr.Length == 4)
+        {
+            int orderNum = int.Parse(arr[0]);
+            string partNum = arr[1];
+            int orderline = int.Parse(arr[2]);
+            decimal qty = decimal.Parse(arr[3]);
+
+            // Method Calling
+            CreateCustShip(orderNum, partNum, orderline, qty);
+            
+        }
+    }
+}
+
